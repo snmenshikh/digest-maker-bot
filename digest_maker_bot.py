@@ -239,6 +239,14 @@ def summarize_text_extractively(text: str, keywords: List[str], max_sentences: i
     top_sorted = sorted(top, key=lambda x: x[0])
     return " ".join(s for _, s, _ in top_sorted)
 
+# ---------- Чистим DOCX ----------
+def clean_text(text: str) -> str:
+    """Удаляем недопустимые символы для docx"""
+    if not text:
+        return ""
+    # Убираем NULL-байты и управляющие символы
+    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+
 # ---------- DOCX generation ----------
 def build_docx_digest(
     user_id: int,
@@ -298,7 +306,7 @@ def build_docx_digest(
                 txt = it["original"]
                 if len(txt) > 800:
                     txt = txt[:800] + "..."
-                doc.add_paragraph(txt)
+                doc.add_paragraph(clean_text(txt))
             doc.add_paragraph("---")
 
     fname = f"digest_{user_id}_{int(datetime.now().timestamp())}.docx"
