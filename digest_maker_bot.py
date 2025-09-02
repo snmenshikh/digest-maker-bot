@@ -296,15 +296,21 @@ def build_docx_digest(
             doc.add_paragraph("Нет подходящих публикаций за выбранный интервал.")
             continue
 
+        unique_items = {}
         for it in items:
             if not it["summary"]:
                 # пропускаем сообщение без summary
                 continue
             
             dt_str = it["dt"].astimezone().strftime("%Y-%m-%d %H:%M") if it["dt"] else "дата не распознана"
+            key = (dt_str, clean_text(it["summary"]))
+            if key not in unique_items:
+                unique_items[key] = it
+            
+        for (dt_str, summary), it in unique_items.items():
             doc.add_paragraph(f"Дата публикации: {dt_str}")
-            doc.add_paragraph(clean_text(it["summary"]))                 
-            doc.add_paragraph("---")
+            doc.add_paragraph(summary)
+            doc.add_paragraph("-------")
 
     fname = f"digest_{user_id}_{int(datetime.now().timestamp())}.docx"
     path = os.path.join(os.getcwd(), fname)
