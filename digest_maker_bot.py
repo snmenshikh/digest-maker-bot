@@ -247,6 +247,12 @@ def clean_text(text: str) -> str:
     # Убираем NULL-байты и управляющие символы
     return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
 
+# создаём tzinfo для UTC+5
+tz_local = timezone(timedelta(hours=5))
+
+# формируем строку с локальным временем
+local_time_str = datetime.now(tz=tz_local).strftime("%Y-%m-%d %H:%M:%S")
+
 # ---------- DOCX generation ----------
 def build_docx_digest(
     user_id: int,
@@ -272,7 +278,7 @@ def build_docx_digest(
     # Мета-информация
     meta = doc.add_paragraph()
     meta.add_run("Сформирован: ").bold = True
-    meta.add_run(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    meta.add_run(datetime.now(tz=tz_local).strftime("%Y-%m-%d %H:%M:%S"))
     meta.add_run("\nИнтервал: ").bold = True
     meta.add_run(interval_label)
     meta.add_run("\nКлючевые слова: ").bold = True
