@@ -255,58 +255,84 @@ def build_docx_digest(
     results: Dict[str, Dict[str, Any]]
 ) -> str:
     """
-    results: {
-      channel_name: {
-        "url": "...",
-        "items": [ { "dt": datetime|None, "original": str, "summary": str } ]
-      }, ...
-    }
-    Returns path to saved .docx
+    Собирает .docx с дайджестом.
+    В документ попадают ТОЛЬКО публикации, у которых есть non-empty summary.
+    Дубликаты по (дата, summary) удаляются.
     """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH  # локальный импорт — решает NameError
+
     doc = Document()
 
-    # Title
+    # Заголовок
     title = doc.add_paragraph()
     run = title.add_run("Краткий дайджест по Telegram-каналам")
-    run.font.bold = True
+    run.bold = True
     run.font.size = Pt(16)
 
-    # Meta
+    # Мета-информация
     meta = doc.add_paragraph()
-    meta.add_run(f"Сформирован: ").bold = True
+    meta.add_run("Сформирован: ").bold = True
     meta.add_run(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     meta.add_run("\nИнтервал: ").bold = True
     meta.add_run(interval_label)
     meta.add_run("\nКлючевые слова: ").bold = True
     meta.add_run(", ".join(keywords) if keywords else "—")
 
-    # Body
+    # Обход каналов — добавляем в документ только те каналы, где есть summary
+    any_channel_written = False
     for ch_name, data in results.items():
-        url = data["url"]
-        items = data["items"]
+        url = data.get("url", "")
+        items = data.get("items", []) or []
 
+        # Собираем только items с summary и убираем дубликаты по (дата, summary)
+        seen = set()
+        unique_items = []
+        for it in items:
+            summary = (it.get("summary") or "").strip()
+            if not summary:
+                continue
+            # безопасный формат даты для ключа
+            dt = it.get("dt")
+            try:
+                if dt is None:
+                    dt_key = "дата не распознана"
+                else:
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt_key = dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                dt_key = "дата не распознана"
+
+            text_key = clean_text(summary)
+            key = (dt_key, text_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_items.append({"dt_str": dt_key, "summary": text_key})
+
+        if not unique_items:
+            # пропускаем канал, если нет подходящих публикаций
+            continue
+
+        # Пишем заголовок канала (только если есть публикации)
         p = doc.add_paragraph()
-
-        # заголовок канала (только если есть публикации)
-        hdr = doc.add_paragraph(ch_name)
-        hdr.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        hdr_run = hdr.runs[0]
-        hdr_run.font.bold = True
-        hdr_run.font.size = Pt(13)
+        run = p.add_run(ch_name)
+        run.bold = True
+        run.font.size = Pt(13)
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
         doc.add_paragraph(f"Источник: {ch_name} ({url})")
 
-        if not items:
-            # пропускаем каналы без подходящих публикаций
-            continue
-
-        unique_items = {}
-        for it in items:
-            dt_str = it["dt"].astimezone().strftime("%Y-%m-%d %H:%M") if it["dt"] else "дата не распознана"
-            doc.add_paragraph(f"Дата публикации: {dt_str}")
-            if it["summary"]:
-                doc.add_paragraph(it["summary"])
+        # Пишем найденные уникальные публикации
+        for it in unique_items:
+            doc.add_paragraph(f"Дата публикации: {it['dt_str']}")
+            doc.add_paragraph(it['summary'])
             doc.add_paragraph("---")
+
+        any_channel_written = True
+
+    if not any_channel_written:
+        doc.add_paragraph("По заданным каналам и ключевым словам публикаций за выбранный интервал не найдено.")
 
     fname = f"digest_{user_id}_{int(datetime.now().timestamp())}.docx"
     path = os.path.join(os.getcwd(), fname)
