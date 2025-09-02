@@ -297,16 +297,13 @@ def build_docx_digest(
             continue
 
         for it in items:
+            if not it["summary"]:
+                # пропускаем сообщение без summary
+                continue
+            
             dt_str = it["dt"].astimezone().strftime("%Y-%m-%d %H:%M") if it["dt"] else "дата не распознана"
             doc.add_paragraph(f"Дата публикации: {dt_str}")
-            if it["summary"]:
-                doc.add_paragraph(it["summary"])
-            else:
-                # fallback — оригинальный текст (усечённый)
-                txt = it["original"]
-                if len(txt) > 800:
-                    txt = txt[:800] + "..."
-                doc.add_paragraph(clean_text(txt))
+            doc.add_paragraph(clean_text(it["summary"]))                 
             doc.add_paragraph("---")
 
     fname = f"digest_{user_id}_{int(datetime.now().timestamp())}.docx"
