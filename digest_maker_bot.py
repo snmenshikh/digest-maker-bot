@@ -333,7 +333,7 @@ def build_docx_digest(
         for it in unique_items:
             doc.add_paragraph(f"Дата публикации: {it['dt_str']}")
             doc.add_paragraph(it['summary'])
-            doc.add_paragraph("---")
+            doc.add_paragraph("-------")
 
         any_channel_written = True
 
