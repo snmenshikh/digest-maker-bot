@@ -1,0 +1,8 @@
+version: "3.9"
+services:
+  digest-maker-bot:
+    build: .
+    image: digest-maker-bot:latest
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
