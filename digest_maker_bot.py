@@ -242,33 +242,35 @@ def summarize_text_extractively(text: str, keywords: List[str], max_sentences: i
     top_sorted = sorted(top, key=lambda x: x[0])
     return " ".join(s for _, s, _ in top_sorted)
 
-def add_hyperlink_to_p(p, r_id, text):
-    # создаём hyperlink элемент
-    hyperlink = OxmlElement('w:hyperlink')
-    hyperlink.set(qn('r:id'), r_id)
-    new_run = OxmlElement('w:r')
-    rPr = OxmlElement('w:rPr')
-    new_run.append(rPr)
-    t = OxmlElement('w:t')
-    t.text = text
-    new_run.append(t)
-    hyperlink.append(new_run)
-    p.append(hyperlink)
-
 def add_hyperlink(paragraph, text, url):
     """
     Добавляет кликабельную ссылку в абзац docx.
-    Работает во всех версиях python-docx.
+    Работает на последних версиях python-docx.
     """
-    # создаём run с текстом
-    run = paragraph.add_run(text)
-    run.font.color.rgb = (0, 0, 255)  # синий цвет
-    run.font.underline = True          # подчёркивание
-
-    # добавляем hyperlink через HYPERLINK relationship
+    # создаём hyperlink элемент
     part = paragraph.part
     r_id = part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
-    hyperlink = paragraph._p.add_hyperlink(r_id, text)
+
+    hyperlink = OxmlElement('w:hyperlink')
+    hyperlink.set(qn('r:id'), r_id)
+
+    # создаём run внутри ссылки
+    new_run = OxmlElement('w:r')
+    rPr = OxmlElement('w:rPr')
+    
+    # стиль гиперссылки
+    rStyle = OxmlElement('w:rStyle')
+    rStyle.set(qn('w:val'), 'Hyperlink')
+    rPr.append(rStyle)
+    new_run.append(rPr)
+
+    # текст ссылки
+    t = OxmlElement('w:t')
+    t.text = text
+    new_run.append(t)
+
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
     return hyperlink
 
 # ---------- Чистим DOCX ----------
@@ -365,10 +367,9 @@ def build_docx_digest(
         for it in unique_items:
             doc.add_paragraph(f"Дата публикации: {it['dt_str']}")
             doc.add_paragraph(it["summary"])
+            # Добавляем ссылку на оригинальный пост
             if it.get("post_url"):
-                paragraph = doc.add_paragraph()
-                r_id = paragraph.part.relate_to(it["post_url"], docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
-                add_hyperlink_to_p(paragraph._p, r_id, "🔗 Открыть оригинал")
+                add_hyperlink(doc.add_paragraph(), "🔗 Открыть оригинал", it["post_url"])
             doc.add_paragraph("----------")
 
         any_channel_written = True
