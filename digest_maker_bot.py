@@ -242,33 +242,30 @@ def summarize_text_extractively(text: str, keywords: List[str], max_sentences: i
     top_sorted = sorted(top, key=lambda x: x[0])
     return " ".join(s for _, s, _ in top_sorted)
 
-def add_hyperlink(paragraph, text, url):
+def add_hyperlink_run(paragraph, text, url):
     """
-    Создаёт кликабельную ссылку в docx.
-    Работает с новой версией python-docx.
+    Добавляет кликабельный текст (гиперссылку) в существующий абзац.
     """
-    # создаём relationship для гиперссылки
     part = paragraph.part
     r_id = part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
 
-    # создаём w:hyperlink
-    hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("r:id"), r_id)
+    # создаём hyperlink элемент
+    hyperlink = OxmlElement('w:hyperlink')
+    hyperlink.set(qn('r:id'), r_id)
 
-    # создаём run внутри ссылки
-    run = OxmlElement("w:r")
-    rPr = OxmlElement("w:rPr")
-    rStyle = OxmlElement("w:rStyle")
-    rStyle.set(qn("w:val"), "Hyperlink")  # используем стиль Hyperlink
+    # создаём run с текстом
+    new_run = OxmlElement('w:r')
+    rPr = OxmlElement('w:rPr')
+    rStyle = OxmlElement('w:rStyle')
+    rStyle.set(qn('w:val'), 'Hyperlink')  # стиль Hyperlink
     rPr.append(rStyle)
-    run.append(rPr)
+    new_run.append(rPr)
 
-    t = OxmlElement("w:t")
+    t = OxmlElement('w:t')
     t.text = text
-    run.append(t)
-    hyperlink.append(run)
+    new_run.append(t)
+    hyperlink.append(new_run)
 
-    # добавляем hyperlink в параграф
     paragraph._p.append(hyperlink)
     return hyperlink
 
@@ -360,7 +357,10 @@ def build_docx_digest(
         run.font.size = Pt(13)
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-        doc.add_paragraph(f"Источник: {ch_name} ({url})")
+        p = doc.add_paragraph()
+        p.add_run(f"Источник: {ch_name} (")
+        add_hyperlink_run(p, url, url)
+        p.add_run(")")
 
         # Пишем найденные уникальные публикации
         for it in unique_items:
