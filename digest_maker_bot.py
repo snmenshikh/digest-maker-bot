@@ -2,7 +2,6 @@ import os
 import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
-import pytz
 
 import pandas as pd
 import requests
@@ -13,6 +12,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.filters import Command
 
 import nltk
 from nltk.tokenize import sent_tokenize
@@ -22,7 +22,7 @@ from docx.shared import Pt
 from docx.oxml.shared import OxmlElement, qn
 import docx.opc.constants
 
-# ---------- Настройка логов ----------
+# ---------- Логи ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("digest_maker_bot")
 
@@ -32,7 +32,7 @@ class DigestStates(StatesGroup):
     WAITING_FOR_INTERVAL = State()
     WAITING_FOR_KEYWORDS = State()
 
-# ---------- Безопасное получение токена ----------
+# ---------- Токен ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден. Установите переменную окружения в Portainer.")
@@ -43,7 +43,7 @@ dp = Dispatcher(storage=MemoryStorage())
 # ---------- NLTK ----------
 nltk.download("punkt")
 
-# ---------- DOCX: функция для добавления гиперссылок ----------
+# ---------- DOCX: гиперссылки ----------
 def add_hyperlink(paragraph, text, url):
     part = paragraph.part
     r_id = part.relate_to(
@@ -96,7 +96,6 @@ def parse_channel(url, keywords, start_dt):
         items = []
         seen = set()
         for post in posts:
-            # Дата
             dt_node = post.find("time")
             dt = None
             if dt_node and dt_node.has_attr("datetime"):
@@ -104,20 +103,17 @@ def parse_channel(url, keywords, start_dt):
                 if dt < start_dt:
                     continue
 
-            # Текст
             text_node = post.find("div", class_="tgme_widget_message_text")
             if not text_node:
                 continue
             text = clean_text(text_node.get_text(" "))
 
-            # ID поста для ссылки
             post_id = post.get("data-post")
             post_url = None
             if post_id and "/" in post_id:
                 channel_username, msg_id = post_id.split("/")
                 post_url = f"https://t.me/{channel_username}/{msg_id}"
 
-            # Суммаризация
             summary = summarize_text_extractively(text, keywords, 3)
 
             key = (dt, summary)
@@ -141,7 +137,6 @@ def build_docx_digest(user_id, channels, keywords, interval_days):
     doc = Document()
     doc.add_heading("Дайджест по Telegram-каналам", level=1)
 
-    # локальное время UTC+5
     local_tz = timezone(timedelta(hours=5))
     doc.add_paragraph(f"Сформирован: {datetime.now(local_tz).strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -154,7 +149,6 @@ def build_docx_digest(user_id, channels, keywords, interval_days):
 
         hdr = doc.add_heading(ch_name, level=2)
         hdr.style.font.size = Pt(13)
-
         doc.add_paragraph(f"Источник: {ch_name} ({url})")
 
         for it in items:
@@ -214,9 +208,7 @@ async def on_excel(message: Message, state: FSMContext):
     await state.update_data(channels=channels)
 
     kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Сутки"), KeyboardButton(text="Неделя"), KeyboardButton(text="Месяц")]
-        ],
+        keyboard=[[KeyboardButton(text="Сутки"), KeyboardButton(text="Неделя"), KeyboardButton(text="Месяц")]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -250,8 +242,8 @@ async def on_keywords(message: Message, state: FSMContext):
 
     await state.clear()
 
-# ---------- Регистрация ----------
-dp.message.register(on_start, commands={"start"})
+# ---------- Регистрация обработчиков ----------
+dp.message.register(on_start, Command(commands=["start"]))
 dp.message.register(on_excel, DigestStates.WAITING_FOR_EXCEL)
 dp.message.register(on_interval, DigestStates.WAITING_FOR_INTERVAL)
 dp.message.register(on_keywords, DigestStates.WAITING_FOR_KEYWORDS)
