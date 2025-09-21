@@ -81,7 +81,9 @@ def summarize_text_extractively(text, keywords, max_sentences=3):
     if not sentences:
         return ""
     if keywords:
-        scored = [s for s in sentences if any(k.lower() in s.lower() for k in keywords)]
+        # приводим ключевые слова к нижнему регистру
+        keywords = [k.lower() for k in keywords]
+        scored = [s for s in sentences if any(k in s.lower() for k in keywords)]
     else:
         scored = sentences
     return " ".join(scored[:max_sentences])
@@ -115,6 +117,8 @@ def parse_channel(url, keywords, start_dt):
                 post_url = f"https://t.me/{channel_username}/{msg_id}"
 
             summary = summarize_text_extractively(text, keywords, 3)
+            if not summary:
+                continue  # пропускаем посты без совпадений по ключевым словам
 
             key = (dt, summary)
             if key in seen:
@@ -145,7 +149,7 @@ def build_docx_digest(user_id, channels, keywords, interval_days):
     for ch_name, url in channels:
         items = parse_channel(url, keywords, start_dt)
         if not items:
-            continue
+            continue  # пропускаем каналы без публикаций
 
         hdr = doc.add_heading(ch_name, level=2)
         hdr.style.font.size = Pt(13)
@@ -155,13 +159,7 @@ def build_docx_digest(user_id, channels, keywords, interval_days):
             dt_str = it["dt"].astimezone(local_tz).strftime("%Y-%m-%d %H:%M") if it["dt"] else "дата не распознана"
             doc.add_paragraph(f"Дата публикации: {dt_str}")
 
-            if it["summary"]:
-                doc.add_paragraph(it["summary"])
-            else:
-                txt = it["original"]
-                if len(txt) > 800:
-                    txt = txt[:800] + "..."
-                doc.add_paragraph(clean_text(txt))
+            doc.add_paragraph(it["summary"])
 
             if it.get("post_url"):
                 add_hyperlink(doc.add_paragraph(), "🔗 Открыть оригинал", it["post_url"])
@@ -230,7 +228,7 @@ async def on_keywords(message: Message, state: FSMContext):
     data = await state.get_data()
     channels = data["channels"]
     interval_days = data["interval_days"]
-    keywords = [k.strip() for k in message.text.split(",") if k.strip()]
+    keywords = [k.strip().lower() for k in message.text.split(",") if k.strip()]
 
     try:
         out_path = build_docx_digest(message.from_user.id, channels, keywords, interval_days)
