@@ -1,351 +1,185 @@
-import asyncio
 import os
-import io
-import re
 import logging
+import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Dict, Any, Optional
+import pytz
 
-import requests
 import pandas as pd
+import requests
 from bs4 import BeautifulSoup
-from dateutil import parser as dtparser
 
-from docx import Document
-from docx.shared import Pt
-
-import nltk
-from nltk.tokenize import sent_tokenize
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-)
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ---------- Logging ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(name)s: %(message)s"
-)
+import nltk
+from nltk.tokenize import sent_tokenize
+
+from docx import Document
+from docx.shared import Pt
+from docx.oxml.shared import OxmlElement, qn
+import docx.opc.constants
+
+# ---------- Настройка логов ----------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("digest_maker_bot")
 
-# ---------- NLTK bootstrap (safe) ----------
-def ensure_nltk():
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        nltk.download("punkt")
-
-# ---------- Secure token retrieval ----------
-def get_bot_token() -> str:
-    """
-    Securely fetch BOT_TOKEN from environment (Portainer -> Stack -> Environment).
-    Never hardcode tokens in code or in the image.
-    """
-    token = os.getenv("BOT_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError(
-            "BOT_TOKEN is not set. Configure it via environment variables in Portainer."
-        )
-    return token
-
-# ---------- FSM States ----------
+# ---------- FSM состояния ----------
 class DigestStates(StatesGroup):
     WAITING_FOR_EXCEL = State()
     WAITING_FOR_INTERVAL = State()
     WAITING_FOR_KEYWORDS = State()
-    PROCESSING = State()
 
-# ---------- Excel validation ----------
-TG_URL_RE = re.compile(r"^https://t\.me/([A-Za-z0-9_]+)/?$")
+# ---------- Безопасное получение токена ----------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден. Установите переменную окружения в Portainer.")
 
-def read_channels_from_excel(file_bytes: bytes) -> List[Tuple[str, str, str]]:
-    """
-    Reads an Excel file (xls/xlsx). Expects:
-      - Col A: Channel Name
-      - Col B: Channel URL (https://t.me/<slug>)
-    Returns list of tuples: (channel_name, channel_url, slug)
-    Raises ValueError with human-friendly messages on problems.
-    """
-    try:
-        # Try to read as Excel (pandas auto-detects xls/xlsx by content)
-        df = pd.read_excel(io.BytesIO(file_bytes), header=None)
-    except Exception as e:
-        raise ValueError(
-            f"Не удалось прочитать Excel. Проверь формат файла (*.xls или *.xlsx). Детали: {e}"
-        )
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-    if df.shape[1] < 2:
-        raise ValueError("В таблице должно быть минимум 2 столбца: A — имя канала, B — ссылка https://t.me/<slug>.")
+# ---------- NLTK ----------
+nltk.download("punkt")
 
-    channels: List[Tuple[str, str, str]] = []
-    for idx, row in df.iterrows():
-        name = str(row.iloc[0]).strip()
-        url = str(row.iloc[1]).strip()
-        if not name or not url:
-            logger.warning(f"Строка {idx+1}: пропущено из-за пустых значений.")
-            continue
+# ---------- DOCX: функция для добавления гиперссылок ----------
+def add_hyperlink(paragraph, text, url):
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK,
+        is_external=True,
+    )
 
-        m = TG_URL_RE.match(url)
-        if not m:
-            raise ValueError(
-                f"Строка {idx+1}: некорректная ссылка '{url}'. Ожидается формат https://t.me/<slug>"
-            )
-        slug = m.group(1)
-        channels.append((name, url, slug))
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
 
-    if not channels:
-        raise ValueError("В файле не найдено ни одной корректной строки с каналом.")
+    new_run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
 
-    return channels
+    rStyle = OxmlElement("w:rStyle")
+    rStyle.set(qn("w:val"), "Hyperlink")
+    rPr.append(rStyle)
+    new_run.append(rPr)
 
-# ---------- Interval helpers ----------
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    t = OxmlElement("w:t")
+    t.text = text
+    new_run.append(t)
 
-def interval_to_timedelta(interval_key: str) -> timedelta:
-    """
-    'day' -> 1 day, 'week' -> 7 days, 'month' -> 30 days
-    """
-    mapping = {
-        "day": timedelta(days=1),
-        "week": timedelta(days=7),
-        "month": timedelta(days=30),
-    }
-    return mapping[interval_key]
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+    return hyperlink
 
-def build_interval_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Сутки", callback_data="interval:day")],
-        [InlineKeyboardButton(text="Неделя", callback_data="interval:week")],
-        [InlineKeyboardButton(text="Месяц", callback_data="interval:month")],
-    ])
-
-# ---------- Scraping ----------
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/122.0.0.0 Safari/537.36"
-}
-
-def make_s_url(slug: str) -> str:
-    return f"https://t.me/s/{slug}"
-
-def parse_telegram_s_page(slug: str) -> List[Dict[str, Any]]:
-    """
-    Scrape https://t.me/s/<slug> and return a list of messages:
-    Each message dict: { "text": str, "dt": datetime (UTC if possible) }
-    Notes:
-      - No JS → we get only visible batch (recent posts).
-      - Time is taken from <time datetime="..."> if present; otherwise None.
-    """
-    url = make_s_url(slug)
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    if r.status_code != 200:
-        raise RuntimeError(f"Не удалось загрузить {url} (HTTP {r.status_code})")
-
-    soup = BeautifulSoup(r.text, "lxml")
-
-    messages = []
-    # Telegram web structure usually wraps messages in 'tgme_widget_message' containers
-    for msg in soup.select(".tgme_widget_message_wrap, .tgme_widget_message"):
-        # Text
-        text_el = msg.select_one(".tgme_widget_message_text")
-        text = text_el.get_text(separator=" ", strip=True) if text_el else ""
-
-        # Datetime
-        dt_value: Optional[datetime] = None
-        time_el = msg.find("time")
-        if time_el and time_el.has_attr("datetime"):
-            try:
-                dt_value = dtparser.isoparse(time_el["datetime"])
-                if dt_value.tzinfo is None:
-                    dt_value = dt_value.replace(tzinfo=timezone.utc)
-                else:
-                    dt_value = dt_value.astimezone(timezone.utc)
-            except Exception:
-                dt_value = None
-
-        if text:
-            messages.append({"text": text, "dt": dt_value})
-
-    return messages
-
-# ---------- Keyword filtering & summarization ----------
-def filter_messages_by_time_and_keywords(
-    messages: List[Dict[str, Any]],
-    since_dt: datetime,
-    keywords: List[str]
-) -> List[Dict[str, Any]]:
-    """
-    Keep messages newer than since_dt and matching keywords (case-insensitive).
-    If keywords list is empty, keep all.
-    """
-    kws = [k.lower() for k in keywords if k.strip()]
-    filtered = []
-    for m in messages:
-        dt_ok = (m["dt"] is None) or (m["dt"] >= since_dt)  # if no dt, we keep it cautiously
-        if not dt_ok:
-            continue
-        if not kws:
-            filtered.append(m)
-            continue
-        text_low = m["text"].lower()
-        if any(kw in text_low for kw in kws):
-            filtered.append(m)
-    return filtered
-
-def summarize_text_extractively(text: str, keywords: List[str], max_sentences: int = 3) -> str:
-    """
-    Simple extractive summary:
-      1) Split into sentences (NLTK Punkt).
-      2) Rank sentences: +2 if contains keyword, +1 per unique non-stopword token frequency (lightweight).
-      3) Return top-N in original order.
-    """
-    if not text:
-        return ""
-    sentences = [s.strip() for s in sent_tokenize(text) if s.strip()]
-    if len(sentences) <= max_sentences:
-        return " ".join(sentences)
-
-    kws = set(k.lower() for k in keywords if k.strip())
-
-    # crude tokenization
-    def tokens(s: str) -> List[str]:
-        return re.findall(r"[A-Za-zА-Яа-яЁё0-9_]+", s.lower())
-
-    # frequency map
-    freq: Dict[str, int] = {}
-    for s in sentences:
-        for t in set(tokens(s)):
-            freq[t] = freq.get(t, 0) + 1
-
-    # sentence scoring
-    scored = []
-    for i, s in enumerate(sentences):
-        ts = tokens(s)
-        score = 0
-        if kws and any(k in s.lower() for k in kws):
-            score += 2
-        score += sum(freq.get(t, 0) for t in set(ts))
-        scored.append((i, s, score))
-
-    # pick top-K by score, keep original order
-    top = sorted(scored, key=lambda x: x[2], reverse=True)[:max_sentences]
-    top_sorted = sorted(top, key=lambda x: x[0])
-    return " ".join(s for _, s, _ in top_sorted)
-
-# ---------- Чистим DOCX ----------
+# ---------- Очистка текста ----------
 def clean_text(text: str) -> str:
-    """Удаляем недопустимые символы для docx"""
-    if not text:
+    return text.replace("\x00", "").replace("\u0000", "").strip()
+
+# ---------- Суммаризация ----------
+def summarize_text_extractively(text, keywords, max_sentences=3):
+    sentences = [s.strip() for s in sent_tokenize(text) if s.strip()]
+    if not sentences:
         return ""
-    # Убираем NULL-байты и управляющие символы
-    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+    if keywords:
+        scored = [s for s in sentences if any(k.lower() in s.lower() for k in keywords)]
+    else:
+        scored = sentences
+    return " ".join(scored[:max_sentences])
 
-# создаём tzinfo для UTC+5
-tz_local = timezone(timedelta(hours=5))
+# ---------- Парсинг канала ----------
+def parse_channel(url, keywords, start_dt):
+    try:
+        html = requests.get(url, timeout=15).text
+        soup = BeautifulSoup(html, "html.parser")
+        posts = soup.find_all("div", class_="tgme_widget_message_wrap")
 
-# формируем строку с локальным временем
-local_time_str = datetime.now(tz=tz_local).strftime("%Y-%m-%d %H:%M:%S")
-
-# ---------- DOCX generation ----------
-def build_docx_digest(
-    user_id: int,
-    interval_label: str,
-    keywords: List[str],
-    results: Dict[str, Dict[str, Any]]
-) -> str:
-    """
-    Собирает .docx с дайджестом.
-    В документ попадают ТОЛЬКО публикации, у которых есть non-empty summary.
-    Дубликаты по (дата, summary) удаляются.
-    """
-    from docx.enum.text import WD_ALIGN_PARAGRAPH  # локальный импорт — решает NameError
-
-    doc = Document()
-
-    # Заголовок
-    title = doc.add_paragraph()
-    run = title.add_run("Краткий дайджест по Telegram-каналам")
-    run.bold = True
-    run.font.size = Pt(16)
-
-    # Мета-информация
-    meta = doc.add_paragraph()
-    meta.add_run("Сформирован: ").bold = True
-    meta.add_run(datetime.now(tz=tz_local).strftime("%Y-%m-%d %H:%M:%S"))
-    meta.add_run("\nИнтервал: ").bold = True
-    meta.add_run(interval_label)
-    meta.add_run("\nКлючевые слова: ").bold = True
-    meta.add_run(", ".join(keywords) if keywords else "—")
-
-    # Обход каналов — добавляем в документ только те каналы, где есть summary
-    any_channel_written = False
-    for ch_name, data in results.items():
-        url = data.get("url", "")
-        items = data.get("items", []) or []
-
-        # Собираем только items с summary и убираем дубликаты по (дата, summary)
+        items = []
         seen = set()
-        unique_items = []
-        for it in items:
-            summary = (it.get("summary") or "").strip()
-            if not summary:
-                continue
-            # безопасный формат даты для ключа
-            dt = it.get("dt")
-            try:
-                if dt is None:
-                    dt_key = "дата не распознана"
-                else:
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    dt_key = dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                dt_key = "дата не распознана"
+        for post in posts:
+            # Дата
+            dt_node = post.find("time")
+            dt = None
+            if dt_node and dt_node.has_attr("datetime"):
+                dt = datetime.fromisoformat(dt_node["datetime"].replace("Z", "+00:00"))
+                if dt < start_dt:
+                    continue
 
-            text_key = clean_text(summary)
-            key = (dt_key, text_key)
+            # Текст
+            text_node = post.find("div", class_="tgme_widget_message_text")
+            if not text_node:
+                continue
+            text = clean_text(text_node.get_text(" "))
+
+            # ID поста для ссылки
+            post_id = post.get("data-post")
+            post_url = None
+            if post_id and "/" in post_id:
+                channel_username, msg_id = post_id.split("/")
+                post_url = f"https://t.me/{channel_username}/{msg_id}"
+
+            # Суммаризация
+            summary = summarize_text_extractively(text, keywords, 3)
+
+            key = (dt, summary)
             if key in seen:
                 continue
             seen.add(key)
-            unique_items.append({"dt_str": dt_key, "summary": text_key})
 
-        if not unique_items:
-            # пропускаем канал, если нет подходящих публикаций
+            items.append({
+                "dt": dt,
+                "summary": summary,
+                "original": text,
+                "post_url": post_url,
+            })
+        return items
+    except Exception as e:
+        logger.error(f"Ошибка парсинга канала {url}: {e}")
+        return []
+
+# ---------- Генерация .docx ----------
+def build_docx_digest(user_id, channels, keywords, interval_days):
+    doc = Document()
+    doc.add_heading("Дайджест по Telegram-каналам", level=1)
+
+    # локальное время UTC+5
+    local_tz = timezone(timedelta(hours=5))
+    doc.add_paragraph(f"Сформирован: {datetime.now(local_tz).strftime('%Y-%m-%d %H:%M:%S')}")
+
+    start_dt = datetime.now(timezone.utc) - timedelta(days=interval_days)
+
+    for ch_name, url in channels:
+        items = parse_channel(url, keywords, start_dt)
+        if not items:
             continue
 
-        # Пишем заголовок канала (только если есть публикации)
-        p = doc.add_paragraph()
-        run = p.add_run(ch_name)
-        run.bold = True
-        run.font.size = Pt(13)
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        hdr = doc.add_heading(ch_name, level=2)
+        hdr.style.font.size = Pt(13)
 
         doc.add_paragraph(f"Источник: {ch_name} ({url})")
 
-        # Пишем найденные уникальные публикации
-        for it in unique_items:
-            doc.add_paragraph(f"Дата публикации: {it['dt_str']}")
-            doc.add_paragraph(it['summary'])
-            doc.add_paragraph("-------")
+        for it in items:
+            dt_str = it["dt"].astimezone(local_tz).strftime("%Y-%m-%d %H:%M") if it["dt"] else "дата не распознана"
+            doc.add_paragraph(f"Дата публикации: {dt_str}")
 
-        any_channel_written = True
+            if it["summary"]:
+                doc.add_paragraph(it["summary"])
+            else:
+                txt = it["original"]
+                if len(txt) > 800:
+                    txt = txt[:800] + "..."
+                doc.add_paragraph(clean_text(txt))
 
-    if not any_channel_written:
-        doc.add_paragraph("По заданным каналам и ключевым словам публикаций за выбранный интервал не найдено.")
+            if it.get("post_url"):
+                add_hyperlink(doc.add_paragraph(), "🔗 Открыть оригинал", it["post_url"])
+
+            doc.add_paragraph("---")
 
     fname = f"digest_{user_id}_{int(datetime.now().timestamp())}.docx"
     path = os.path.join(os.getcwd(), fname)
     doc.save(path)
     return path
 
-# ---------- Bot setup ----------
+# ---------- Обработчики ----------
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
@@ -359,137 +193,72 @@ async def on_start(message: Message, state: FSMContext):
 
 async def on_excel(message: Message, state: FSMContext):
     if not message.document:
-        await message.answer("Это не файл. Пожалуйста, пришлите Excel (*.xls или *.xlsx).")
+        await message.answer("Пожалуйста, пришлите файл Excel.")
         return
 
-    file_name = message.document.file_name or ""
-    if not (file_name.endswith(".xls") or file_name.endswith(".xlsx")):
-        await message.answer("Нужен Excel-файл (*.xls или *.xlsx). Пришлите правильный файл.")
-        return
+    file_path = f"temp_{message.from_user.id}.xlsx"
+    await bot.download(message.document, destination=file_path)
 
     try:
-        # download file bytes
-        file = await message.bot.get_file(message.document.file_id)
-        file_bytes = await message.bot.download_file(file.file_path)
-        content = file_bytes.read()
-
-        # validate & parse
-        channels = read_channels_from_excel(content)
-        await state.update_data(channels=channels)
-
-        await message.answer(
-            "Файл принят и проверен ✅\nВыберите интервал:",
-            reply_markup=build_interval_keyboard()
-        )
-        await state.set_state(DigestStates.WAITING_FOR_INTERVAL)
-
-    except ValueError as ve:
-        logger.exception("Excel validation failed")
-        await message.answer(f"Ошибка проверки Excel: {ve}")
+        df = pd.read_excel(file_path, engine="openpyxl")
+        if df.shape[1] < 2:
+            raise ValueError("Файл должен содержать минимум 2 столбца: имя и ссылку.")
+        channels = df.iloc[:, :2].dropna().values.tolist()
     except Exception as e:
-        logger.exception("Excel processing unexpected error")
-        await message.answer(f"Не удалось обработать файл. Подробности: {e}")
-
-async def on_interval(callback: CallbackQuery, state: FSMContext):
-    if not callback.data or not callback.data.startswith("interval:"):
-        await callback.answer()
+        await message.answer(f"Ошибка чтения Excel: {e}")
         return
-    key = callback.data.split(":", 1)[1]  # 'day' | 'week' | 'month'
-    if key not in ("day", "week", "month"):
-        await callback.answer("Неизвестный интервал")
-        return
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
-    await state.update_data(interval_key=key)
-    await callback.message.answer(
-        "Введите ключевые слова через запятую (например: ИИ, Python, вакансии).\n"
-        "Можно оставить пустым — тогда я соберу всё подряд и кратко резюмирую."
+    await state.update_data(channels=channels)
+
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Сутки"), KeyboardButton(text="Неделя"), KeyboardButton(text="Месяц")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
+    await message.answer("Выберите интервал времени:", reply_markup=kb)
+    await state.set_state(DigestStates.WAITING_FOR_INTERVAL)
+
+async def on_interval(message: Message, state: FSMContext):
+    intervals = {"Сутки": 1, "Неделя": 7, "Месяц": 30}
+    interval_days = intervals.get(message.text)
+    if not interval_days:
+        await message.answer("Пожалуйста, выберите интервал из кнопок.")
+        return
+
+    await state.update_data(interval_days=interval_days)
+    await message.answer("Введите ключевые слова (через запятую):")
     await state.set_state(DigestStates.WAITING_FOR_KEYWORDS)
-    await callback.answer()
 
 async def on_keywords(message: Message, state: FSMContext):
-    await message.answer("Принял. Формирую дайджест, это может занять немного времени…")
-    await state.set_state(DigestStates.PROCESSING)
-
     data = await state.get_data()
-    channels: List[Tuple[str, str, str]] = data.get("channels", [])
-    interval_key: str = data.get("interval_key", "week")
-
-    # parse keywords
-    raw = (message.text or "").strip()
-    keywords = [w.strip() for w in re.split(r"[,\n;]+", raw) if w.strip()]
-
-    # Ensure NLTK
-    ensure_nltk()
+    channels = data["channels"]
+    interval_days = data["interval_days"]
+    keywords = [k.strip() for k in message.text.split(",") if k.strip()]
 
     try:
-        # Time window
-        since = now_utc() - interval_to_timedelta(interval_key)
-        interval_label = {"day": "Сутки", "week": "Неделя", "month": "Месяц"}[interval_key]
-
-        results: Dict[str, Dict[str, Any]] = {}
-
-        for ch_name, ch_url, slug in channels:
-            try:
-                msgs = parse_telegram_s_page(slug)
-                msgs = filter_messages_by_time_and_keywords(msgs, since, keywords)
-
-                items = []
-                for m in msgs:
-                    summary = summarize_text_extractively(m["text"], keywords, max_sentences=3)
-                    items.append({
-                        "dt": m["dt"],
-                        "original": m["text"],
-                        "summary": summary
-                    })
-
-                results[ch_name] = {"url": ch_url, "items": items}
-
-            except Exception as e:
-                logger.exception(f"Ошибка парсинга канала {ch_name} ({ch_url})")
-                results[ch_name] = {
-                    "url": ch_url,
-                    "items": [],
-                }
-                # Добавим "сообщение об ошибке" как элемент, чтобы пользователь видел, что канал не обработан
-                results[ch_name]["items"].append({
-                    "dt": None,
-                    "original": f"Не удалось получить данные с {make_s_url(slug)}: {e}",
-                    "summary": ""
-                })
-
-        # Build DOCX
-        out_path = build_docx_digest(
-            user_id=message.from_user.id,
-            interval_label=interval_label,
-            keywords=keywords,
-            results=results
-        )
-
-        await message.answer_document(FSInputFile(out_path), caption="Готово. Ваш дайджест 📄")
-        await state.clear()
-
+        out_path = build_docx_digest(message.from_user.id, channels, keywords, interval_days)
+        await message.answer_document(types.FSInputFile(out_path))
+        os.remove(out_path)
     except Exception as e:
-        logger.exception("Unexpected processing error")
-        await message.answer(f"Произошла ошибка при формировании дайджеста: {e}")
-        await state.clear()
+        logger.error(f"Unexpected processing error: {e}", exc_info=True)
+        await message.answer("Ошибка при обработке. Попробуйте снова.")
 
-# ---------- Entrypoint ----------
+    await state.clear()
+
+# ---------- Регистрация ----------
+dp.message.register(on_start, commands={"start"})
+dp.message.register(on_excel, DigestStates.WAITING_FOR_EXCEL)
+dp.message.register(on_interval, DigestStates.WAITING_FOR_INTERVAL)
+dp.message.register(on_keywords, DigestStates.WAITING_FOR_KEYWORDS)
+
+# ---------- Main ----------
 async def main():
-    token = get_bot_token()
-    bot = Bot(token=token)
-    dp = Dispatcher(storage=MemoryStorage())
-
-    dp.message.register(on_start, CommandStart())
-    dp.message.register(on_excel, DigestStates.WAITING_FOR_EXCEL)
-    dp.callback_query.register(on_interval, F.data.startswith("interval:"), DigestStates.WAITING_FOR_INTERVAL)
-    dp.message.register(on_keywords, DigestStates.WAITING_FOR_KEYWORDS)
-
-    logger.info("Bot started. Waiting for updates...")
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+    asyncio.run(main())

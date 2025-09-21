@@ -2,7 +2,17 @@ version: "3.9"
 services:
   digest-maker-bot:
     build: .
+    container_name: digest-maker-bot
     image: digest-maker-bot:latest
     restart: unless-stopped
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - TZ=Asia/Yekaterinburg    # твой часовой пояс UTC+5
+    volumes:
+      - ./data:/app/data         # чтобы сохранять выгруженные файлы (Excel, docx)
+    networks:
+      - botnet
+
+networks:
+  botnet:
+    driver: bridge

@@ -1,26 +1,31 @@
+# Базовый образ
 FROM python:3.11-slim
 
-# System deps for pandas/lxml
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Устанавливаем системные зависимости
+RUN apt-get update && apt-get install -y \
     build-essential \
-    libxml2-dev libxslt1-dev \
+    python3-dev \
+    libxml2-dev \
+    libxslt-dev \
+    libjpeg-dev \
+    zlib1g-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Workdir
+# Создаём рабочую директорию
 WORKDIR /app
 
-# Copy deps early for caching
-COPY requirements.txt /app/requirements.txt
+# Копируем зависимости
+COPY requirements.txt .
+
+# Устанавливаем зависимости Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy bot code
-COPY digest_maker_bot.py /app/digest_maker_bot.py
+# Копируем код бота
+COPY . .
 
-# Security: do not bake tokens into the image. Use env BOT_TOKEN at runtime.
+# Указываем переменные окружения (токен хранится в Portainer Env)
 ENV PYTHONUNBUFFERED=1
 
-# Optional: create a non-root user (good practice)
-# RUN useradd -ms /bin/bash appuser
-# USER appuser
-
+# Точка входа
 CMD ["python", "digest_maker_bot.py"]
