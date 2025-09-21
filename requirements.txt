@@ -1,10 +1,11 @@
-aiogram==3.10.0
+aiogram==3.7.0
 pandas==2.2.2
 openpyxl==3.1.5
 xlrd==2.0.1
 beautifulsoup4==4.12.3
 requests==2.32.3
-nltk==3.9.1
+nltk==3.8.1
 python-docx==1.1.2
 lxml==5.3.0
 pytz==2025.1
+python-dateutil==2.9.0.post0

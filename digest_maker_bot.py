@@ -13,6 +13,8 @@ from dateutil import parser as dtparser
 
 from docx import Document
 from docx.shared import Pt
+from docx.oxml.shared import OxmlElement, qn
+import docx.opc.constants
 
 import nltk
 from nltk.tokenize import sent_tokenize
@@ -239,6 +241,33 @@ def summarize_text_extractively(text: str, keywords: List[str], max_sentences: i
     top_sorted = sorted(top, key=lambda x: x[0])
     return " ".join(s for _, s, _ in top_sorted)
 
+def add_hyperlink(paragraph, text, url):
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK,
+        is_external=True,
+    )
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+
+    rStyle = OxmlElement("w:rStyle")
+    rStyle.set(qn("w:val"), "Hyperlink")
+    rPr.append(rStyle)
+    new_run.append(rPr)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    new_run.append(t)
+
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+    return hyperlink
+
 # ---------- Чистим DOCX ----------
 def clean_text(text: str) -> str:
     """Удаляем недопустимые символы для docx"""
@@ -333,6 +362,9 @@ def build_docx_digest(
         for it in unique_items:
             doc.add_paragraph(f"Дата публикации: {it['dt_str']}")
             doc.add_paragraph(it['summary'])
+            # Добавляем ссылку на оригинальный пост
+            if it.get("post_url"):
+                add_hyperlink(doc.add_paragraph(), "🔗 Открыть оригинальный пост", it["post_url"])
             doc.add_paragraph("-------")
 
         any_channel_written = True
