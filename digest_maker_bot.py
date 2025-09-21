@@ -368,7 +368,9 @@ def build_docx_digest(
             doc.add_paragraph(it["summary"])
             # Добавляем ссылку на оригинальный пост
             if it.get("post_url"):
-                add_hyperlink(doc.add_paragraph(), "Оригинальный пост", it["post_url"])
+                p = doc.add_paragraph()
+                p.add_run("Оригинальный пост: ").bold = True
+                p.add_run(it["post_url"]).underline = True
             doc.add_paragraph("----------")
 
         any_channel_written = True
