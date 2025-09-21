@@ -242,10 +242,35 @@ def summarize_text_extractively(text: str, keywords: List[str], max_sentences: i
     top_sorted = sorted(top, key=lambda x: x[0])
     return " ".join(s for _, s, _ in top_sorted)
 
-def add_link_as_run(paragraph, text, url):
-    run = paragraph.add_run(f"{text}: {url}")
-    run.font.color.rgb = docx.shared.RGBColor(0, 0, 255)  # синий
-    run.font.underline = True
+def add_hyperlink(paragraph, text, url):
+    """
+    Создаёт кликабельную ссылку в docx.
+    Работает с новой версией python-docx.
+    """
+    # создаём relationship для гиперссылки
+    part = paragraph.part
+    r_id = part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+
+    # создаём w:hyperlink
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    # создаём run внутри ссылки
+    run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    rStyle = OxmlElement("w:rStyle")
+    rStyle.set(qn("w:val"), "Hyperlink")  # используем стиль Hyperlink
+    rPr.append(rStyle)
+    run.append(rPr)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+
+    # добавляем hyperlink в параграф
+    paragraph._p.append(hyperlink)
+    return hyperlink
 
 # ---------- Чистим DOCX ----------
 def clean_text(text: str) -> str:
@@ -343,7 +368,7 @@ def build_docx_digest(
             doc.add_paragraph(it["summary"])
             # Добавляем ссылку на оригинальный пост
             if it.get("post_url"):
-                add_link_as_run(doc.add_paragraph(), "Оригинальный пост", it["post_url"])
+                add_hyperlink(doc.add_paragraph(), "Оригинальный пост", it["post_url"])
             doc.add_paragraph("----------")
 
         any_channel_written = True
